@@ -1,2 +1,2 @@
-# Preidictive-Maintenance
-R projects for making forecasts 
+# Preidictive Analysis and Forecasting
+Weather Forecast based on weather data of the Spanish Weather Agency

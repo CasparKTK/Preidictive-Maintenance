@@ -1,0 +1,397 @@
+---
+title: "Project 2"
+author: "Caspar Kwong"
+date: "1/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(fpp2)
+library(fpp3)
+library(dplyr)
+library(tsibble)
+library(readxl)
+library(zoo)
+library(hts)
+library(forecast)
+library(neuralnet)
+library(thief)
+library(ggplot2)
+```
+
+```{r}
+energy <- read.csv("data_energy.csv")
+weather <- read.csv("data_weather.csv")
+```
+
+```{r}
+#Plotting Data of Dec 2018 
+energy_2018.12 <- energy[34321:35064,c(1,26,27,28,29)] %>% rename(price = price.actual, demand = total.load.actual)
+ggplot(data = energy_2018.12, aes(x = time, y = demand, group =1))+ geom_line()+ggtitle("Hourly Demand of December 2018")
+ggplot(data = energy_2018.12, aes(x = time, y = price, group =1))+ geom_line()+ggtitle("Hourly Price of December 2018")
+```
+```{r}
+weather_2018.12 <- weather[, -c(2,4,5,9,11,15,16,17)] %>% group_by(dt_iso)%>% 
+  summarise(temp = mean(temp, na.rm = TRUE),
+            pressure = mean(pressure, na.rm = TRUE),
+            humidity = mean(humidity, na.rm = TRUE),
+            wind = mean(wind_speed, na.rm = TRUE),
+            rain = mean(rain_1h, na.rm = TRUE),
+            snow = mean(snow_3h, na.rm = TRUE),
+            cloud = mean(clouds_all, na.rm = TRUE),
+            id = mean(weather_id, na.rm = TRUE))
+weather_2018.12 <- weather_2018.12[34321:35064, ]
+ggplot(data = weather_2018.12, aes(x = dt_iso, y = temp, group =1))+ geom_line()+ggtitle("Hourly Temperature of December 2018")
+ggplot(data = weather_2018.12, aes(x = dt_iso, y = wind, group =1))+ geom_line()+ggtitle("Hourly Wind Speed of December 2018")
+ggplot(data = weather_2018.12, aes(x = dt_iso, y = rain, group =1))+ geom_line()+ggtitle("Hourly Rainfall of December 2018")
+ggplot(data = weather_2018.12, aes(x = dt_iso, y = snow, group =1))+ geom_line()+ggtitle("Hourly Snow of December 2018")
+ggplot(data = weather_2018.12, aes(x = dt_iso, y = cloud, group =1))+ geom_line()+ggtitle("Daily Cloud of December 2018")
+```
+
+
+```{r}
+#Extracting Data from the energy and weather data set
+energy.select <- energy[34873:35064, c(1,26,27,28,29)] %>% rename(price = price.actual, demand = total.load.actual)
+#Data of different regions is compiled and average is taken
+weather.select <- weather[, -c(2,4,5,9,11,15,16,17)] %>% group_by(dt_iso)%>% 
+  summarise(temp = mean(temp, na.rm = TRUE),
+            pressure = mean(pressure, na.rm = TRUE),
+            humidity = mean(humidity, na.rm = TRUE),
+            wind = mean(wind_speed, na.rm = TRUE),
+            rain = mean(rain_1h, na.rm = TRUE),
+            snow = mean(snow_3h, na.rm = TRUE),
+            cloud = mean(clouds_all, na.rm = TRUE),
+            id = mean(weather_id, na.rm = TRUE))
+weather.select <- weather.select[34873:35064, ] %>% rename(time = dt_iso)
+```
+
+```{r}
+train_end <- 168
+test_start <- 169
+test_end <- 192
+```
+
+
+```{r}
+#Time Series for training and tesing data test
+energy.price.ts <- ts(energy.select$price, frequency = 24)
+energy.demand.ts <- ts(energy.select$demand, frequency = 24)
+price.training <- subset(energy.price.ts, end = train_end )
+price.testing <- subset(energy.price.ts, start  = test_start)
+demand.training <- subset(energy.demand.ts, end = train_end)
+demand.testing <- subset(energy.demand.ts, start  = test_start) 
+
+
+```
+
+```{r}
+#Classical Method for Demand
+demand.sn <- snaive(demand.training, h = length(demand.testing))
+demand.hw.add <- hw(demand.training, seasonal = "additive", h = length(demand.testing))
+demand.hw.mult <- hw(demand.training, seasonal = "multiplicative", h = length(demand.testing))
+demand.lambda <- BoxCox.lambda(demand.training)
+demand.bc <- demand.training %>% BoxCox(demand.lambda) %>% hw(seasonal = "additive", h = length(demand.testing))
+demand.inv.mean <- InvBoxCox(demand.bc$mean, demand.lambda)
+demand.inv.upper <- InvBoxCox(demand.bc$upper, demand.lambda)
+demand.inv.lower <- InvBoxCox(demand.bc$lower, demand.lambda)
+autoplot(demand.inv.mean) + autolayer(demand.inv.lower) + autolayer(demand.inv.upper)+ autolayer(demand.training)
+autoplot(demand.sn)
+autoplot(demand.hw.add)
+autoplot(demand.hw.mult)
+```
+```{r}
+accuracy(demand.hw.add$mean, demand.testing)
+accuracy(demand.hw.mult$mean, demand.testing)
+```
+
+
+```{r}
+#Classical Method for Price
+price.sn <- snaive(price.training, h = length(price.testing))
+price.hw.add <- hw(price.training, seasonal = "additive", h = length(price.testing))
+price.hw.mult <- hw(price.training, seasonal = "multiplicative", h = length(price.testing))
+price.lambda <- BoxCox.lambda(price.training)
+price.bc <- price.training %>% BoxCox(price.lambda) %>% hw(seasonal = "additive", h = length(price.testing))
+price.inv.mean <- InvBoxCox(price.bc$mean, price.lambda)
+price.inv.upper <- InvBoxCox(price.bc$upper, price.lambda)
+price.inv.lower <- InvBoxCox(price.bc$lower, price.lambda)
+autoplot(price.inv.mean) + autolayer(price.inv.lower) + autolayer(price.inv.upper)+ autolayer(price.training)
+autoplot(price.sn)
+autoplot(price.hw.add)
+autoplot(price.hw.mult)
+```
+```{r}
+#hierarchical model
+demandagg = tsaggregates(demand.training)
+fc.demand24 <- forecast(demandagg$Hourly, h=24)
+accuracy(fc.demand24$mean,demand.testing)
+autoplot(fc.demand24)
+
+```
+
+
+```{r}
+priceagg = tsaggregates(price.training)
+fc.price24 <- forecast(priceagg$Hourly, h=24 )
+accuracy(fc.price24$mean,price.testing)
+autoplot(fc.price24)
+```
+
+```{r}
+plot(demandagg)
+plot(priceagg
+     )
+```
+
+```{r}
+#Reconciled Hierarchical Forecast(based on example of Thief package)
+dbase <- list()
+for(i in seq_along(demandagg))
+  dbase[[i]] <- forecast(demandagg[[i]],
+                 h=frequency(demandagg[[i]]), level=80)
+
+# Reconcile forecasts
+dreconciled <- reconcilethief(dbase)
+dhie<-accuracy(dreconciled[[1]], demand.testing)[2,c(2,5)]
+
+#Plot original and reconciled forecasts
+par(mfrow=c(2,3), mar=c(3,3,1,0))
+for(i in 8:1)
+{
+  plot(dreconciled[[i]], main=names(demandagg)[i],
+       )
+  lines(dbase[[i]]$mean, col="red")
+}
+```
+```{r}
+pbase <- list()
+for(i in seq_along(priceagg))
+  pbase[[i]] <- forecast(priceagg[[i]],
+                 h=frequency(priceagg[[i]]), level=80)
+
+# Reconcile forecasts
+preconciled <- reconcilethief(pbase)
+accuracy(preconciled[[1]], price.testing)[2,c(2,5)]
+
+#Plot original and reconciled forecasts
+par(mfrow=c(2,3), mar=c(3,3,1,0))
+for(i in 8:1)
+{
+  plot(preconciled[[i]], main=names(priceagg)[i],
+       )
+  lines(pbase[[i]]$mean, col="red")
+}
+```
+
+```{r}
+#Neural Network with neuralnet package, worse than nnetar
+combined <- merge(energy.select,weather.select) %>% mutate(hour = as.numeric(format(as.POSIXct(time), format = "%H")))
+combined.training <- combined[1:train_end,]
+combined.testing <- combined[test_start:test_end,]
+normalize <- function(x){
+  return((x-min(x))/(max(x)-min(x)))
+}
+combined.training["price"]<- as.data.frame(lapply(combined.training["price"],normalize))
+combined.training["demand"]<- as.data.frame(lapply(combined.training["demand"],normalize))
+combined.training["temp"]<- as.data.frame(lapply(combined.training["temp"],normalize))
+combined.training["rain"]<- as.data.frame(lapply(combined.training["rain"],normalize))
+combined.testing["price"]<- as.data.frame(lapply(combined.testing["price"],normalize))
+combined.testing["demand"]<- as.data.frame(lapply(combined.testing["demand"],normalize))
+combined.testing["temp"]<- as.data.frame(lapply(combined.training["temp"],normalize))
+combined.testing["rain"]<- as.data.frame(lapply(combined.training["rain"],normalize))
+
+nndemand <- neuralnet(demand ~ temp + rain, data = combined.training, hidden =c(3,3) )
+fc.nndemand <-neuralnet::compute(nndemand,combined.testing)
+```
+
+```{r}
+nndemand <- neuralnet(demand ~ temp + hour, data = combined.training, hidden = c(3,3))
+plot(nndemand)
+cor(combined.testing[,4], fc.nndemand$net.result[,1])
+cor(combined.testing[,8], fc.nndemand$net.result[,1])
+```
+#xreg
+```{r}
+nnprice <- neuralnet(price ~ temp + hour, data = combined.training, hidden =c(3,3,4,4) )
+fc.nnprice <-neuralnet::compute(nndemand,combined.testing)
+cor(combined.testing[,4], fc.nndemand$net.result[,1])
+cor(combined.testing[,8], fc.nndemand$net.result[,1])
+plot(nnprice)
+```
+
+
+```{r}
+#inverse of normalized nn for demand
+max_demand <- max(combined[1:train_end,"demand"])
+min_demand <- min(combined[1:train_end,"demand"])
+denormalize_demand <- function(x){
+  return(x*(max_demand - min_demand)+min_demand)
+}
+nndemand_inv <- denormalize_demand(fc.nndemand$net.result) %>% ts(start = 8,frequency = 24)
+```
+
+```{r}
+max_price <- max(combined[1:train_end,"price"])
+min_price <- min(combined[1:train_end,"price"])
+denormalize_price <- function(x){
+  return(x*(max_price - min_price)+min_price)
+}
+nnprice_inv <- denormalize_price(fc.nndemand$net.result) %>% ts(start = 8,frequency = 24)
+```
+
+```{r}
+#Neural Network with nnetar package
+nntar<-merge(energy.select,weather.select) %>% mutate(hour = as.numeric(format(as.POSIXct(time), format = "%H")))
+nntar.training <- nntar[1:train_end,]
+nntar.testing <- nntar[test_start:test_end,]
+demand_fit = nnetar(demand.training,xreg = nntar.training[,c(6,7,8,9,10,13,14)], h =24)
+demand.nntar.fc = forecast(demand_fit,xreg = nntar.testing[,c(6,7,8,9,10,13,14)], h = 24)
+autoplot(demand.nntar.fc)
+accuracy(demand.nntar.fc,demand.testing)[,c(2,5)]
+cor(nntar.testing[,6],demand.nntar.fc$mean)
+cor(nntar.testing[,7],demand.nntar.fc$mean)
+cor(nntar.testing[,8],demand.nntar.fc$mean)
+cor(nntar.testing[,9],demand.nntar.fc$mean)
+cor(nntar.testing[,10],demand.nntar.fc$mean)
+cor(nntar.testing[,13],demand.nntar.fc$mean)
+cor(nntar.testing[,14],demand.nntar.fc$mean)
+
+```
+```{r}
+#Model with influencial factors
+demand_fit = nnetar(demand.training,xreg = nntar.training[,c(6,7,9,14)], h =24)
+demand.nntar.fc = forecast(demand_fit,xreg = nntar.testing[,c(6,7,9,14)], h = 24)
+autoplot(demand.nntar.fc)
+accuracy(demand.nntar.fc,demand.testing)[2,c(2,5)]
+```
+
+```{r}
+#Model with repeats and lambda parameter
+demand_fit = nnetar(demand.training,xreg = nntar.training[,c(6,7,9,14)],repeats = 100,lambda = "auto", h =24)
+demand.nntar.fc = forecast(demand_fit,xreg = nntar.testing[,c(6,7,9,14)], h = 24)
+dnn <- accuracy(demand.nntar.fc,demand.testing)[2,c(2,5)]
+```
+
+```{r}
+#NN model for price
+price_fit = nnetar(price.training,xreg = nntar.training[,c(3,6,7,8,9,10,13,14)], h =24)
+price.nntar.fc = forecast(price_fit,xreg = nntar.testing[,c(3,6,7,8,9,10,13,14)], h = 24)
+autoplot(price.nntar.fc)
+accuracy(price.nntar.fc,price.testing)[,c(2,5)]
+cor(nntar.testing[,3],price.nntar.fc$mean)
+cor(nntar.testing[,6],price.nntar.fc$mean)
+cor(nntar.testing[,7],price.nntar.fc$mean)
+cor(nntar.testing[,8],price.nntar.fc$mean)
+cor(nntar.testing[,9],price.nntar.fc$mean)
+cor(nntar.testing[,10],price.nntar.fc$mean)
+cor(nntar.testing[,13],price.nntar.fc$mean)
+cor(nntar.testing[,14],price.nntar.fc$mean)
+```
+```{r}
+#Model with most important factors
+price_fit = nnetar(price.training,xreg = nntar.training[,c(3,6,8,9,14)], repeats = 100, lambda = "auto", h =24)
+price.nntar.fc = forecast(price_fit,xreg = nntar.testing[,c(3,6,8,9,14)], h = 24)
+pnn <- accuracy(price.nntar.fc,price.testing)[2,c(2,5)]
+pnn
+```
+
+```{r}
+#Robustness Check for NN
+#Data from Dec 2017
+energy.robust <- energy[25561:26304, c(1,26,27,28,29)] %>% rename(price = price.actual, demand = total.load.actual)
+weather.robust <- weather[, -c(2,4,5,9,11,15,16,17)] %>% group_by(dt_iso)%>% 
+  summarise(temp = mean(temp, na.rm = TRUE),
+            pressure = mean(pressure, na.rm = TRUE),
+            humidity = mean(humidity, na.rm = TRUE),
+            wind = mean(wind_speed, na.rm = TRUE),
+            rain = mean(rain_1h, na.rm = TRUE),
+            snow = mean(snow_3h, na.rm = TRUE),
+            cloud = mean(clouds_all, na.rm = TRUE),
+            id = mean(weather_id, na.rm = TRUE))
+weather.robust <- weather.robust[25561:26304, ] %>% rename(time = dt_iso)
+robust.data <-merge(energy.robust,weather.robust) %>% mutate(hour = as.numeric(format(as.POSIXct(time), format = "%H")))
+robust.training <- robust.data[1:720,]
+robust.testing <- robust.data[721:744,]
+dtr_ts<- robust.training[,3] %>% ts(frequency = 24)
+dtr_ts2<- robust.training[529:696,3] %>%ts(frequency = 24, start = 1)
+dte_ts1<- robust.testing[,3] %>% ts(frequency = 24, start = 8)
+dte_ts2<- robust.testing[,3] %>% ts(frequency = 24, start = 31)
+#Model train with 30 days data
+demand_long = nnetar(dtr_ts,xreg = robust.training[,c(6,7,9,14)],repeats = 100,lambda = "auto", h =24)
+demand_short = nnetar(dtr_ts2,xreg = robust.training[529:696,c(6,7,9,14)],repeats = 100,lambda = "auto", h =24)
+demand.rf.fc1 = forecast(demand_fit,xreg = robust.testing[,c(6,7,9,14)], h = 24)
+#Comparison between original model and newly train model
+accuracy(demand.rf.fc1,dte_ts1)[2,c(2,5)]
+demand.rf.fc2 = forecast(demand_long,xreg = robust.testing[,c(6,7,9,14)], h = 24)
+accuracy(demand.rf.fc2,dte_ts2)[2,c(2,5)]
+demand.rf.fc3 = forecast(demand_short,xreg = robust.testing[,c(6,7,9,14)], h = 24)
+accuracy(demand.rf.fc3,dte_ts1)[2,c(2,5)]
+```
+
+
+
+```{r}
+#Robustness Chekc for price forecast
+ptr_ts<- robust.training[,5] %>% ts(frequency = 24)
+pte_ts1<- robust.testing[,5] %>% ts(frequency = 24, start = 8)
+pte_ts2<- robust.testing[,5] %>% ts(frequency = 24, start = 31)
+price_long = nnetar(ptr_ts,xreg = robust.training[,c(3,6,8,9,14)],repeats = 100, h =24)
+price.rf.fc1 = forecast(price_fit,xreg = robust.testing[,c(3,6,8,9,14)], h = 24)
+accuracy(price.rf.fc1,pte_ts1)[2,c(2,5)]
+price.rf.fc2 = forecast(price_long,xreg = robust.testing[,c(3,6,8,9,14)], h = 24)
+accuracy(price.rf.fc2,pte_ts2)[2,c(2,5)]
+```
+
+
+```{r}
+#accuracy
+#demand
+dsn<-accuracy(demand.sn, demand.testing)[2,c(2,5)]
+dhwa<-accuracy(demand.hw.add, demand.testing)[2,c(2,5)]
+dhwm<-accuracy(demand.hw.mult, demand.testing)[2,c(2,5)]
+dhwi<-accuracy(demand.inv.mean, demand.testing)[,c(2,5)]
+demand_accuracy <- as.data.frame(bind_rows(dsn,dhwa,dhwm,dhwi,dhie,dnn))
+rownames(demand_accuracy)<-c('Seasonal',"Additive Holt WInter","Multiplicative Holit Winter", "Transformed Holt Winter","Hierarchical","Neural Network")
+
+#price
+psn<-accuracy(price.sn, price.testing)[2,c(2,5)]
+phwa<-accuracy(price.hw.add, price.testing)[2,c(2,5)]
+phwm<-accuracy(price.hw.mult, price.testing)[2,c(2,5)]
+phwi<-accuracy(price.inv.mean, price.testing)[,c(2,5)]
+phie<-accuracy(fc.price24$mean,price.testing)[,c(2,5)]
+price_accuracy <- as.data.frame(bind_rows(psn,phwa,phwm,phwi,phie,pnn))
+rownames(price_accuracy)<-c('Seasonal',"Additive Holt WInter","Multiplicative Holit Winter", "Transformed Holt Winter","Hierarchical","Neural Network")
+```
+
+```{r}
+#Accuracy of given demand forecasts
+actual_demand_ts <- ts(energy.select$demand[test_start:test_end], frequency = 24, start = 8)
+forecast_demand_ts <- ts(energy.select$total.load.forecast[test_start:test_end], frequency = 24, start = 8)
+accuracy(actual_demand_ts,forecast_demand_ts)
+```
+
+
+```{r}
+#Accuracy of given price forecasts
+actual_price_ts <- ts(energy.select$price[test_start:test_end], frequency = 24, start = 8)
+forecast_price_ts <- ts(energy.select$price.day.ahead[test_start:test_end], frequency = 24, start = 8)
+accuracy(actual_price_ts,forecast_price_ts)
+```
+
+```{r}
+#Visualization of new methods vs given forecasts
+ autoplot(demand.testing)+
+  autolayer(demand.nntar.fc, PI =FALSE,series = 'Neural Network')+
+  autolayer(dreconciled[[1]],PI =FALSE, series = 'Hierarchical')+
+  autolayer(forecast_demand_ts, series = 'Given Forecast')
+```
+```{r}
+ autoplot(price.testing)+
+  autolayer(price.nntar.fc, PI =FALSE,series = 'Neural Network')+
+  autolayer(fc.price24$mean, series = 'Hierarchical')+
+  autolayer(forecast_price_ts, series = 'Given Forecast')
+```
